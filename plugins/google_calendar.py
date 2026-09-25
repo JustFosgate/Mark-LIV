@@ -1,4 +1,4 @@
-"""Create, read, and manage Google Calendar events."""
+"""Create, read, search, update, and delete Google Calendar events."""
 
 import json
 from datetime import datetime, timezone
@@ -11,22 +11,27 @@ from googleapiclient.discovery import build
 _CONFIG = Path(__file__).resolve().parent.parent / "config"
 _CLIENT = _CONFIG / "client_secret.json"
 _TOKEN = _CONFIG / "token_calendar.json"
+
 _SCOPES = ["https://www.googleapis.com/auth/calendar"] 
 
 PLUGIN = {
     "name": "google_calendar",
     "description": (
-        "Manage Google Calendar events: create new appointments, list upcoming events, "
-        "and delete events when needed."
+        "Manage Google Calendar events: create new appointments, read upcoming events, "
+        "search for specific events by keyword, update existing events, and delete events."
     ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "operation": {"type": "STRING", "enum": ["create", "read", "delete"]},
-            "summary": {"type": "STRING", "description": "Title or summary of the event (for create)."},
+            "operation": {
+                "type": "STRING", 
+                "enum": ["create", "read", "search", "update", "delete"]
+            },
+            "summary": {"type": "STRING", "description": "Title or summary of the event (for create or update)."},
             "start_time": {"type": "STRING", "description": "Start time in ISO format (e.g., 2026-10-01T14:00:00)."},
             "end_time": {"type": "STRING", "description": "End time in ISO format (e.g., 2026-10-01T15:00:00)."},
-            "event_id": {"type": "STRING", "description": "Specific event identifier (required for delete)."},
+            "event_id": {"type": "STRING", "description": "Specific event identifier (required for update or delete)."},
+            "query": {"type": "STRING", "description": "Search keyword for finding specific events (for search)."},
         },
         "required": ["operation"],
     },
@@ -46,7 +51,7 @@ def _save_token(creds: Credentials) -> None:
 
 def connect() -> tuple[bool, str]:
     if not _CLIENT.is_file():
-        return False, "Put your Desktop OAuth JSON at config/client_secret_keep.json."
+        return False, "Put your Desktop OAuth JSON at config/client_secret.json."
     try:
         flow = InstalledAppFlow.from_client_secrets_file(str(_CLIENT), _SCOPES)
         creds = flow.run_local_server(port=0)
@@ -77,27 +82,35 @@ def run(parameters: dict) -> str:
     start_time = str(parameters.get("start_time", "")).strip()
     end_time = str(parameters.get("end_time", "")).strip()
     event_id = str(parameters.get("event_id", "")).strip()
+    query = str(parameters.get("query", "")).strip()
     
     try:
         service = build("calendar", "v3", credentials=creds, cache_discovery=False)
+        
+        calendar_info = service.calendars().get(calendarId="primary").execute()
+        user_timezone = calendar_info.get("timeZone", "UTC")
         
         if operation == "create":
             if not summary or not start_time or not end_time:
                 return "Sir, please provide a summary, start_time, and end_time to create an event."
             
+            clean_start = start_time.replace("Z", "").split("+")[0]
+            clean_end = end_time.replace("Z", "").split("+")[0]
+            
             event_body = {
                 "summary": summary,
-                "start": {"dateTime": start_time, "timeZone": "Europe/Berlin"},
-                "end": {"dateTime": end_time, "timeZone": "Europe/Berlin"},
+                "start": {"dateTime": clean_start, "timeZone": user_timezone},
+                "end": {"dateTime": clean_end, "timeZone": user_timezone},
             }
             
             result = service.events().insert(calendarId="primary", body=event_body).execute()
             return f"Sir, I scheduled '{summary}' for you (ID: {result.get('id')})."
             
         elif operation == "read":
-            now = datetime.now(timezone.utc).isoformat()
+            time_min = start_time if start_time else datetime.now(timezone.utc).isoformat()
+            
             events_result = service.events().list(
-                calendarId="primary", timeMin=now, maxResults=5, singleEvents=True,
+                calendarId="primary", timeMin=time_min, maxResults=10, singleEvents=True,
                 orderBy="startTime"
             ).execute()
             events = events_result.get("items", [])
@@ -108,18 +121,66 @@ def run(parameters: dict) -> str:
             formatted = []
             for event in events:
                 raw_start = event["start"].get("dateTime", event["start"].get("date"))
-                
                 try:
                     dt = datetime.fromisoformat(raw_start)
                     start_formatted = dt.strftime("%d.%m.%Y um %H:%M Uhr")
                 except ValueError:
                     start_formatted = raw_start
                 
-                summary = event.get('summary', 'Untitled')
-                formatted.append(f"- {summary} ({start_formatted})")
+                event_summary = event.get('summary', 'Untitled')
+                event_id_val = event.get('id', '')
+                formatted.append(f"- {event_summary} am {start_formatted} (ID: {event_id_val})")
                 
             return "Sir, here are your next upcoming events:\n" + "\n".join(formatted)
+
+        elif operation == "search":
+            if not query:
+                return "Sir, please provide a search query to look up specific events."
+            
+            events_result = service.events().list(
+                calendarId="primary", q=query, singleEvents=True, orderBy="startTime"
+            ).execute()
+            events = events_result.get("items", [])
+            
+            if not events:
+                return f"Sir, I couldn't find any events matching '{query}'."
+            
+            formatted = []
+            for event in events:
+                raw_start = event["start"].get("dateTime", event["start"].get("date"))
+                try:
+                    dt = datetime.fromisoformat(raw_start)
+                    start_formatted = dt.strftime("%d.%m.%Y um %H:%M Uhr")
+                except ValueError:
+                    start_formatted = raw_start
                 
+                event_summary = event.get('summary', 'Untitled')
+                event_id_val = event.get('id', '')
+                formatted.append(f"- {event_summary} am {start_formatted} (ID: {event_id_val})")
+                
+            return f"Sir, here are the events matching '{query}':\n" + "\n".join(formatted)
+            
+        elif operation == "update":
+            if not event_id:
+                return "Sir, please provide an event_id to update."
+            
+            event = service.events().get(calendarId="primary", eventId=event_id).execute()
+            
+            if summary:
+                event["summary"] = summary
+            if start_time:
+                clean_start = start_time.replace("Z", "").split("+")[0]
+                event["start"] = {"dateTime": clean_start, "timeZone": user_timezone}
+            if end_time:
+                clean_end = end_time.replace("Z", "").split("+")[0]
+                event["end"] = {"dateTime": clean_end, "timeZone": user_timezone}
+                
+            updated_event = service.events().update(
+                calendarId="primary", eventId=event_id, body=event
+            ).execute()
+            
+            return f"Sir, I successfully updated the event '{updated_event.get('summary')}' (ID: {event_id})."
+            
         elif operation == "delete":
             if not event_id:
                 return "Sir, please provide an event_id to delete."
