@@ -17,8 +17,8 @@ _SCOPES = ["https://www.googleapis.com/auth/calendar"]
 PLUGIN = {
     "name": "google_calendar",
     "description": (
-        "Manage Google Calendar events: create new appointments, read upcoming events, "
-        "search for specific events by keyword, update existing events, and delete events."
+        "Manage Google Calendar events and reminders: create new appointments or timed reminders "
+        "(with push notifications), read upcoming events, search by keyword, update, and delete events."
     ),
     "parameters": {
         "type": "OBJECT",
@@ -101,6 +101,12 @@ def run(parameters: dict) -> str:
                 "summary": summary,
                 "start": {"dateTime": clean_start, "timeZone": user_timezone},
                 "end": {"dateTime": clean_end, "timeZone": user_timezone},
+                "reminders": {
+                    "useDefault": False,
+                    "overrides": [
+                        {"method": "popup", "minutes": 0},
+                    ],
+                },
             }
             
             result = service.events().insert(calendarId="primary", body=event_body).execute()
@@ -174,7 +180,14 @@ def run(parameters: dict) -> str:
             if end_time:
                 clean_end = end_time.replace("Z", "").split("+")[0]
                 event["end"] = {"dateTime": clean_end, "timeZone": user_timezone}
-                
+            
+            event["reminders"] = {
+                "useDefault": False,
+                "overrides": [
+                    {"method": "popup", "minutes": 0},
+                ],
+            }
+            
             updated_event = service.events().update(
                 calendarId="primary", eventId=event_id, body=event
             ).execute()
